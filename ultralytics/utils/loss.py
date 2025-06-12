@@ -256,6 +256,20 @@ class v8DetectionLoss:
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
+        # Ignore regions mask
+        ignore_mask = torch.zeros(batch_size, anchor_points.shape[0], dtype=torch.bool, device=self.device)
+        if "ignores" in batch:
+            ig = torch.cat((batch["batch_idx_ignore"].view(-1, 1), batch["ignores"]), 1)
+            ig = self.preprocess(ig.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            ig_boxes = ig[..., :4]
+            anchor_xy = anchor_points * stride_tensor
+            for i in range(batch_size):
+                boxes = ig_boxes[i][ig_boxes[i].sum(1) > 0]
+                if len(boxes):
+                    axy = anchor_xy.unsqueeze(0)
+                    m = ((axy >= boxes[:, :2, None]) & (axy <= boxes[:, 2:, None])).all(1).any(0)
+                    ignore_mask[i] = m
+
         # Targets
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
@@ -277,13 +291,15 @@ class v8DetectionLoss:
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        valid_mask = ~ignore_mask
+        target_scores_sum = max((target_scores * valid_mask.unsqueeze(-1)).sum(), 1)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = (self.bce(pred_scores, target_scores.to(dtype)) * valid_mask.unsqueeze(-1)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
+        fg_mask = fg_mask & valid_mask
         if fg_mask.sum():
             target_bboxes /= stride_tensor
             loss[0], loss[2] = self.bbox_loss(

@@ -2155,6 +2155,13 @@ class Format:
         instances = labels.pop("instances")
         instances.convert_bbox(format=self.bbox_format)
         instances.denormalize(w, h)
+        ignore_mask = cls.reshape(-1) < 0
+        if ignore_mask.any():
+            ignore_boxes = instances[ignore_mask].bboxes.copy()
+            cls = cls[~ignore_mask]
+            instances = instances[~ignore_mask]
+        else:
+            ignore_boxes = np.zeros((0, 4), dtype=np.float32)
         nl = len(instances)
 
         if self.return_mask:
@@ -2169,6 +2176,7 @@ class Format:
         labels["img"] = self._format_img(img)
         labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
+        labels["ignores"] = torch.from_numpy(ignore_boxes) if len(ignore_boxes) else torch.zeros((0, 4))
         if self.return_keypoint:
             labels["keypoints"] = torch.from_numpy(instances.keypoints)
             if self.normalize:
@@ -2182,9 +2190,13 @@ class Format:
         if self.normalize:
             labels["bboxes"][:, [0, 2]] /= w
             labels["bboxes"][:, [1, 3]] /= h
+            if len(ignore_boxes):
+                labels["ignores"][:, [0, 2]] /= w
+                labels["ignores"][:, [1, 3]] /= h
         # Then we can use collate_fn
         if self.batch_idx:
             labels["batch_idx"] = torch.zeros(nl)
+            labels["batch_idx_ignore"] = torch.zeros(len(ignore_boxes))
         return labels
 
     def _format_img(self, img):

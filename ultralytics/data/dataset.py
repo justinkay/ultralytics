@@ -122,12 +122,19 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for i, (im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg) in enumerate(pbar):
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
                 nc += nc_f
                 if im_file:
+                    ignore_file = self.ignore_files[i]
+                    if os.path.isfile(ignore_file):
+                        with open(ignore_file, "r", encoding="utf-8") as f:
+                            ignores = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                            ignores = np.array(ignores, dtype=np.float32)
+                    else:
+                        ignores = np.zeros((0, 4), dtype=np.float32)
                     x["labels"].append(
                         {
                             "im_file": im_file,
@@ -136,6 +143,7 @@ class YOLODataset(BaseDataset):
                             "bboxes": lb[:, 1:],  # n, 4
                             "segments": segments,
                             "keypoints": keypoint,
+                            "ignore_regions": ignores,
                             "normalized": True,
                             "bbox_format": "xywh",
                         }
@@ -149,7 +157,7 @@ class YOLODataset(BaseDataset):
             LOGGER.info("\n".join(msgs))
         if nf == 0:
             LOGGER.warning(f"{self.prefix}No labels found in {path}. {HELP_URL}")
-        x["hash"] = get_hash(self.label_files + self.im_files)
+        x["hash"] = get_hash(self.label_files + self.ignore_files + self.im_files)
         x["results"] = nf, nm, ne, nc, len(self.im_files)
         x["msgs"] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
@@ -165,11 +173,12 @@ class YOLODataset(BaseDataset):
             (List[dict]): List of label dictionaries, each containing information about an image and its annotations.
         """
         self.label_files = img2label_paths(self.im_files)
+        self.ignore_files = img2ignore_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
-            assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
+            assert cache["hash"] == get_hash(self.label_files + self.ignore_files + self.im_files)  # identical hash
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
@@ -267,6 +276,7 @@ class YOLODataset(BaseDataset):
         bboxes = label.pop("bboxes")
         segments = label.pop("segments", [])
         keypoints = label.pop("keypoints", None)
+        ignores = label.pop("ignore_regions", [])
         bbox_format = label.pop("bbox_format")
         normalized = label.pop("normalized")
 
@@ -280,6 +290,11 @@ class YOLODataset(BaseDataset):
             segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
         else:
             segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
+        if len(ignores):
+            bboxes = np.concatenate([bboxes, np.array(ignores, dtype=np.float32)], 0)
+            cls = label["cls"]
+            cls = np.concatenate([cls, -np.ones((len(ignores), 1), dtype=cls.dtype)], 0)
+            label["cls"] = cls
         label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
         return label
 
@@ -304,13 +319,19 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "ignores"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
+        if "batch_idx_ignore" in new_batch:
+            new_batch["batch_idx_ignore"] = list(new_batch["batch_idx_ignore"])
         for i in range(len(new_batch["batch_idx"])):
             new_batch["batch_idx"][i] += i  # add target image index for build_targets()
+            if "batch_idx_ignore" in new_batch:
+                new_batch["batch_idx_ignore"][i] += i
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+        if "batch_idx_ignore" in new_batch:
+            new_batch["batch_idx_ignore"] = torch.cat(new_batch["batch_idx_ignore"], 0)
         return new_batch
 
 

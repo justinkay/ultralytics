@@ -47,6 +47,12 @@ def img2label_paths(img_paths: List[str]) -> List[str]:
     return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
 
 
+def img2ignore_paths(img_paths: List[str]) -> List[str]:
+    """Return ignore-region label paths by replacing 'images' with 'ignore'."""
+    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}ignore{os.sep}"
+    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
+
+
 def check_file_speeds(
     files: List[str], threshold_ms: float = 10, threshold_mb: float = 50, max_files: int = 5, prefix: str = ""
 ):
